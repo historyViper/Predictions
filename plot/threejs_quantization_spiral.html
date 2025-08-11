@@ -1,0 +1,222 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <title>69‑Sector Quantization – Spiral Demo</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <style>
+    html, body { height: 100%; margin: 0; background:#0b0f14; color:#cfe9ff; font-family: ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, Ubuntu, Cantarell, Noto Sans, Helvetica, Arial; }
+    #app { height: 100%; }
+    .hud { position: absolute; top: 10px; left: 10px; background:#111827b3; padding:10px 12px; border-radius:10px; backdrop-filter: blur(6px); box-shadow: 0 8px 24px #0008; }
+    .hud h1 { font-size: 14px; margin: 0 0 6px; color:#93c5fd; letter-spacing: .3px }
+    .hud label { display:block; margin:6px 0; font-size: 12px; }
+    .hud input[type=range] { width: 180px; }
+    .legend { position:absolute; bottom:10px; left:10px; font-size:12px; opacity:.8 }
+    a { color:#93c5fd }
+  </style>
+</head>
+<body>
+  <div id="app"></div>
+  <div class="hud">
+    <h1>Quantization Controls</h1>
+    <label>Quantization step (MeV): <span id="stepLabel">69</span>
+      <input id="step" type="range" min="69" max="138" step="1" value="69" />
+    </label>
+    <label><input id="togglePrimes" type="checkbox" checked /> Highlight prime-indexed sectors</label>
+    <label>Turns: <span id="turnsLabel">18</span>
+      <input id="turns" type="range" min="6" max="64" step="1" value="18" />
+    </label>
+    <label>Pitch: <span id="pitchLabel">0.08</span>
+      <input id="pitch" type="range" min="0.02" max="0.20" step="0.01" value="0.08" />
+    </label>
+  </div>
+  <div class="legend">Drag to orbit · Scroll to zoom · Double‑click to focus</div>
+
+  <script type="module">
+    import * as THREE from 'https://cdn.skypack.dev/three@0.160.0/build/three.module.js';
+    import { OrbitControls } from 'https://cdn.skypack.dev/three@0.160.0/examples/jsm/controls/OrbitControls.js';
+
+    const app = document.getElementById('app');
+    const renderer = new THREE.WebGLRenderer({ antialias:true, alpha:false });
+    renderer.setPixelRatio(devicePixelRatio);
+    renderer.setSize(innerWidth, innerHeight);
+    app.appendChild(renderer.domElement);
+
+    const scene = new THREE.Scene();
+    scene.background = new THREE.Color(0x0b0f14);
+
+    const camera = new THREE.PerspectiveCamera(45, innerWidth/innerHeight, 0.1, 2000);
+    camera.position.set(7, 8, 12);
+
+    const controls = new OrbitControls(camera, renderer.domElement);
+    controls.enableDamping = true;
+
+    // Lights
+    const hemi = new THREE.HemisphereLight(0xaecbfd, 0x0b0f14, 0.8);
+    scene.add(hemi);
+    const dir = new THREE.DirectionalLight(0xffffff, 0.7);
+    dir.position.set(5, 8, 6);
+    scene.add(dir);
+
+    // Ground grid
+    const grid = new THREE.GridHelper(40, 40, 0x1f2a44, 0x162036);
+    grid.position.y = -3.5;
+    scene.add(grid);
+
+    // ------- Prime helpers -------
+    function sievePrimes(n=500) {
+      const limit = n < 1000 ? 8000 : n * 20; // rough
+      const A = new Uint8Array(limit+1);
+      const out = [];
+      for (let i=2;i<=limit;i++) if (!A[i]) { out.push(i); for (let j=i*i;j<=limit;j+=i) A[j]=1; if (out.length>=n) break; }
+      return out;
+    }
+    const PRIMES = sievePrimes(3000); // cache ~3000 primes
+    const primeAt = (k)=> PRIMES[k>=0? k : 0] || 2;
+
+    // ------- Sectors (69 by default) -------
+    const state = {
+      quantStep: 69,
+      turns: 18,
+      pitch: 0.08, // z increment per radian
+      sectors: 69,
+      showPrimeHighlight: true,
+    };
+
+    const sectorGroup = new THREE.Group();
+    scene.add(sectorGroup);
+
+    function buildSectors() {
+      sectorGroup.clear();
+      const R = 6.5;
+      for (let s=0; s<state.sectors; s++) {
+        const angle = (s/state.sectors) * Math.PI*2;
+        // thin radial wedge: a plane with small width
+        const geom = new THREE.BoxGeometry(R*2, 0.015, 0.001);
+        const mat = new THREE.MeshBasicMaterial({ color:0x0ea5e9, transparent:true, opacity:0.18 });
+        const bar = new THREE.Mesh(geom, mat);
+        bar.position.set(Math.cos(angle)*R/2, Math.sin(angle)*R/2, 0);
+        bar.rotation.z = angle;
+        bar.userData.sectorIndex = s;
+        sectorGroup.add(bar);
+      }
+    }
+
+    // ------- Spiral path (helix) -------
+    const spiralGroup = new THREE.Group();
+    scene.add(spiralGroup);
+
+    const pathMat = new THREE.LineBasicMaterial({ color:0x60a5fa, transparent:true, opacity:0.9 });
+    let pathLine = null;
+
+    function getSpiralPoints(turns, pitch) {
+      const pts = [];
+      const stepsPerTurn = 240; // resolution
+      const total = Math.max(1, Math.floor(turns*stepsPerTurn));
+      const a = 0.35; // base radius factor
+      for (let i=0;i<=total;i++) {
+        const t = i/stepsPerTurn; // radians per step ~ (i/stepsPerTurn)*2π
+        const theta = t * Math.PI*2; // radians
+        const primeIndex = Math.floor(theta/(Math.PI*2)) + 3; // start at p3=5
+        const p = primeAt(primeIndex);
+        const r = a * Math.log(p); // log-prime radial scaling
+        const x = r*Math.cos(theta);
+        const y = r*Math.sin(theta);
+        const z = pitch * theta * state.quantStep/69; // map MeV step to z-scale subtly
+        pts.push(new THREE.Vector3(x,y,z));
+      }
+      return pts;
+    }
+
+    function rebuildSpiral() {
+      if (pathLine) spiralGroup.remove(pathLine);
+      const pts = getSpiralPoints(state.turns, state.pitch);
+      const geom = new THREE.BufferGeometry().setFromPoints(pts);
+      pathLine = new THREE.Line(geom, pathMat);
+      spiralGroup.add(pathLine);
+    }
+
+    // ------- Energy labels -------
+    const labelGroup = new THREE.Group();
+    scene.add(labelGroup);
+
+    function makeTextSprite(text, color='#ff6b6b') {
+      const canvas = document.createElement('canvas');
+      const size = 256; canvas.width = canvas.height = size;
+      const ctx = canvas.getContext('2d');
+      ctx.clearRect(0,0,size,size);
+      ctx.fillStyle = 'rgba(0,0,0,0)'; ctx.fillRect(0,0,size,size);
+      ctx.font = 'bold 64px system-ui, -apple-system, Segoe UI, Roboto';
+      ctx.fillStyle = color; ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+      ctx.strokeStyle = 'rgba(255,255,255,0.18)'; ctx.lineWidth = 3;
+      ctx.strokeText(text, size/2, size/2);
+      ctx.fillText(text, size/2, size/2);
+      const tex = new THREE.CanvasTexture(canvas); tex.needsUpdate = true;
+      const mat = new THREE.SpriteMaterial({ map: tex, depthTest: true, depthWrite:false, transparent:true });
+      const sprite = new THREE.Sprite(mat); sprite.scale.set(2.4, 1.2, 1);
+      return sprite;
+    }
+
+    function rebuildLabels() {
+      labelGroup.clear();
+      const energies = [state.quantStep, 2*state.quantStep, 3*state.quantStep];
+      for (const E of energies) {
+        const z = (E/69) * state.pitch * Math.PI*2 * (state.turns*0.25); // approximate mapping
+        const sp = makeTextSprite(`${E} MeV`);
+        sp.position.set(0, 0, z);
+        labelGroup.add(sp);
+      }
+    }
+
+    // ------- Prime highlighting on sectors (optional) -------
+    function animateSectors(time) {
+      const t = time*0.0015;
+      sectorGroup.children.forEach((mesh,i)=>{
+        const s = mesh.userData.sectorIndex;
+        const isPrimeSector = isPrimeIndex(s);
+        const base = state.showPrimeHighlight && isPrimeSector ? 0.42 : 0.18;
+        mesh.material.opacity = base + 0.08*Math.sin(t*( (s%23)+1 ));
+        mesh.material.color.setHex(isPrimeSector && state.showPrimeHighlight ? 0x38bdf8 : 0x0ea5e9);
+      });
+    }
+
+    function isPrimeIndex(idx) {
+      if (idx<2) return false;
+      for (let p=2;p*p<=idx;p++) if (idx%p===0) return false;
+      return true;
+    }
+
+    // Initial build
+    buildSectors();
+    rebuildSpiral();
+    rebuildLabels();
+
+    // Responsive
+    addEventListener('resize', ()=>{
+      camera.aspect = innerWidth/innerHeight; camera.updateProjectionMatrix();
+      renderer.setSize(innerWidth, innerHeight);
+    });
+
+    // Controls bindings
+    const step = document.getElementById('step');
+    const stepLabel = document.getElementById('stepLabel');
+    const turns = document.getElementById('turns');
+    const turnsLabel = document.getElementById('turnsLabel');
+    const pitch = document.getElementById('pitch');
+    const pitchLabel = document.getElementById('pitchLabel');
+    const togglePrimes = document.getElementById('togglePrimes');
+
+    step.addEventListener('input', ()=>{ state.quantStep = +step.value; stepLabel.textContent = step.value; rebuildLabels(); rebuildSpiral(); });
+    turns.addEventListener('input', ()=>{ state.turns = +turns.value; turnsLabel.textContent = turns.value; rebuildSpiral(); rebuildLabels(); });
+    pitch.addEventListener('input', ()=>{ state.pitch = +pitch.value; pitchLabel.textContent = (+pitch.value).toFixed(2); rebuildSpiral(); rebuildLabels(); });
+    togglePrimes.addEventListener('change', ()=>{ state.showPrimeHighlight = togglePrimes.checked; });
+
+    // Animation loop
+    renderer.setAnimationLoop((time)=>{
+      controls.update();
+      animateSectors(time);
+      renderer.render(scene, camera);
+    });
+  </script>
+</body>
+</html>
